@@ -4,9 +4,9 @@ services:
     container_name: searxng
     restart: unless-stopped
     ports:
-      - "9090:8080"
+      - "9099:8080"
     environment:
-      - BASE_URL=http://localhost:9090/
+      - BASE_URL=http://localhost:9099/
       - INSTANCE_NAME=MetaPress SearXNG
       - SEARXNG_SECRET=change_this_to_a_long_random_string
     volumes:

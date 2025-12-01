@@ -1,4 +1,5 @@
 import logging
+import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from services.ai_service import (
     rerank_search_results_with_llm,   # NEW
 )
 from services.searxng_service import search_web_with_searxng
+from services.crawler_service import crawl_urls
 
 
 # Cấu hình log chung
@@ -38,7 +40,7 @@ def health_check():
 
 
 @app.post("/api/research", response_model=ResearchResponse)
-def run_research(payload: ResearchRequest):
+async def run_research(payload: ResearchRequest):
     """
     1. Từ name + object_type (+ short_description) -> Gemini sinh summary + key_points + search_query.
     2. Dùng search_query (ngắn) cho SearXNG.
@@ -115,7 +117,27 @@ def run_research(payload: ResearchRequest):
         )
         # giữ nguyên results
 
-    # 3) Trả về cho frontend + crawler
+    # 3) Crawl content (Top N)
+    try:
+        # Lấy số lượng URL tối đa từ env (mặc định 5)
+        crawl_limit = int(os.getenv("CRAWL_MAX_RESULTS", "5"))
+        
+        # Lấy tối đa N URL đầu tiên để crawl
+        top_urls = [r.url for r in results[:crawl_limit] if r.url]
+        if top_urls:
+            log.info("[api] crawling %d urls...", len(top_urls))
+            crawled_data = await crawl_urls(top_urls)
+            
+            # Map content back to results
+            for r in results:
+                if str(r.url) in crawled_data:
+                    r.content = crawled_data[str(r.url)]
+            log.info("[api] crawl finished")
+    except Exception as e:
+        log.error("[api] Crawler error: %s", e, exc_info=True)
+        # Không raise error, chỉ log, vẫn trả về kết quả search
+
+    # 4) Trả về cho frontend + crawler
     return ResearchResponse(
         name=payload.name,
         object_type=payload.object_type,

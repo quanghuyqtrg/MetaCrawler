@@ -23,3 +23,6 @@ SEARXNG_TIMEOUT=20
 # (nếu bạn đã thêm)
 # Độ dài tối đa của search_query dùng cho SearXNG
 SEARCH_QUERY_MAX_LEN=260
+
+# Số lượng URL tối đa để crawl nội dung (Top N)
+CRAWL_MAX_RESULTS=5

@@ -30,6 +30,7 @@ class SearchResult(BaseModel):
     description: Optional[str] = None
     published_date: Optional[str] = None  # để string, crawler tự xử lý
     score: Optional[float] = Field(None, description="Điểm liên quan sau bước rerank (0.0–1.0); None nếu chưa rerank")
+    content: Optional[str] = None         # nội dung bài viết (nếu crawl được)
 
 
 class ResearchResponse(BaseModel):
