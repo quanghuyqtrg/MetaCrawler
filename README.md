@@ -19,6 +19,7 @@ graph LR
     B --> C[Gemini AI Service]
     B --> D[SearXNG Service]
     C --> E[Google Gemini API]
+    E[Google Gemini API] --> F[SearXNG Engine]
     D --> F[SearXNG Engine]
     F --> G[Multiple Search Engines]
 ```
@@ -192,7 +193,7 @@ Response:
       "published_date": "2024-01-15"
     }
   ],
-  "crawler_payload": [...]
+  "crawler_payload": ["..."]
 }
 ```
 

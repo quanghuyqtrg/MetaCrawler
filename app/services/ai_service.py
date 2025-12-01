@@ -185,7 +185,6 @@ def _fallback_summary(
     )
     return overview, key_points, search_query
 
-
 def generate_topic_summary(
     name: str,
     object_type: str,
@@ -260,7 +259,7 @@ def generate_topic_summary(
         resp = _model.generate_content(
             prompt,
             generation_config={
-                "max_output_tokens": 400,
+                "max_output_tokens": 600,
                 "temperature": 0.4,
             },
         )
@@ -348,8 +347,8 @@ def generate_topic_summary(
 
     # Làm gọn search_query: bỏ xuống dòng, giới hạn độ dài
     search_query = " ".join(search_query.split())
-    if len(search_query) > 200:
-        search_query = search_query[:300]
+    if len(search_query) > 220:
+        search_query = search_query[:220]
 
     # Log info tổng quan
     log.info(
