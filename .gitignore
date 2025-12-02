@@ -29,3 +29,6 @@ __pycache__/
 # SearXNG / data local (nếu có)
 app/searxng/data/
 app/searxng/config.yml.local
+
+# Project specific
+GIT_WORKFLOW.md
