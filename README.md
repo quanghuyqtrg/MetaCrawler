@@ -59,7 +59,7 @@ cp ".env example" .env
 ```env
 # Gemini API Configuration
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_MODEL=gemini-2.0-flash
 
 # SearXNG Configuration
 SEARXNG_BASE_URL=http://searxng:8080
