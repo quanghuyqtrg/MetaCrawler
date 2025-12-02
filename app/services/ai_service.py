@@ -7,6 +7,8 @@ from typing import List, Tuple
 import google.generativeai as genai
 from dotenv import load_dotenv
 
+from schemas import SearchResult  # NEW
+
 log = logging.getLogger("metacrawler.gemini")
 
 # 1) Load .env ở thư mục app/.env
@@ -25,6 +27,11 @@ log.info(
     ENV_PATH,
 )
 
+# Cấu hình cho bước rerank bằng LLM
+RERANK_LLM_ENABLED = True           # bật/tắt rerank LLM
+RERANK_LLM_MIN_SCORE = 0.35         # ngưỡng lọc: 0.0–1.0
+RERANK_LLM_MAX_CANDIDATES = 20     # tối đa số bài gửi lên LLM để chấ
+
 # 2) Khởi tạo model
 if GEMINI_API_KEY:
     try:
@@ -37,6 +44,230 @@ if GEMINI_API_KEY:
 else:
     _model = None
     log.warning("[gemini] GEMINI_API_KEY không có, luôn fallback")
+    # Cấu hình cho bước rerank bằng LLM
+    RERANK_LLM_ENABLED = True  # có thể tắt nếu cần
+    RERANK_LLM_MIN_SCORE = 0.35  # 0.0–1.0, càng cao càng lọc gắt
+    RERANK_LLM_MAX_CANDIDATES = 20  # tối đa số bài gửi lên LLM để chấm
+
+
+def rerank_search_results_with_llm(
+    name: str,
+    object_type: str,
+    short_description: str | None,
+    language: str,
+    search_query: str,
+    results: List[SearchResult],
+    max_results: int,
+) -> List[SearchResult]:
+    """
+    Dùng Gemini để chấm điểm mức độ liên quan của từng kết quả search,
+    sau đó sort + lọc lại, cắt còn tối đa max_results.
+
+    Nếu có lỗi / model không sẵn sàng -> trả lại kết quả gốc (safety).
+    """
+    if not RERANK_LLM_ENABLED:
+        return results[:max_results]
+
+    if _model is None:
+        log.warning("[gemini] rerank requested but _model is None -> skip")
+        return results[:max_results]
+
+    if not results:
+        return []
+
+    # Giới hạn số bài đưa lên LLM để đỡ tốn token
+    max_candidates = min(len(results), RERANK_LLM_MAX_CANDIDATES)
+    candidates = results[:max_candidates]
+
+    # Chuẩn hóa dữ liệu đầu vào cho LLM
+    items_payload = []
+    for idx, item in enumerate(candidates):
+        title = (getattr(item, "title", "") or "")
+        desc = (getattr(item, "description", "") or "")
+        items_payload.append(
+            {
+                "index": idx,                       # index trong danh sách candidates
+                "title": title[:200],               # cắt ngắn cho đỡ tốn token
+                "description": desc[:400],
+            }
+        )
+
+    lang_label = "Tiếng Việt" if (language or "").startswith("vi") else (language or "English")
+
+    if short_description:
+        hint_block = f"- Mô tả ngắn của người dùng: {short_description.strip()}"
+    else:
+        hint_block = "- Mô tả ngắn của người dùng: (không có, hãy suy luận bối cảnh hợp lý từ tên và query)."
+
+    items_json = json.dumps(items_payload, ensure_ascii=False)
+
+    prompt = f"""
+Bạn là trợ lý nghiên cứu, nhiệm vụ là CHẤM ĐIỂM MỨC ĐỘ LIÊN QUAN của các bài báo
+đối với chủ đề sau và TRẢ VỀ DUY NHẤT MỘT ĐỐI TƯỢNG JSON HỢP LỆ.
+
+Bối cảnh:
+- Tên đối tượng: {name}
+- Loại đối tượng: {object_type} (person, event, topic)
+- Ngôn ngữ: {lang_label}
+- Câu truy vấn tìm kiếm đã sử dụng: {search_query}
+{hint_block}
+
+Danh sách kết quả tìm kiếm (mỗi phần tử có 'index', 'title', 'description'):
+
+{items_json}
+
+Nhiệm vụ:
+- Đánh giá mức độ liên quan của từng kết quả đến đúng đối tượng/chủ đề ở trên.
+- Chỉ xem là "liên quan cao" nếu bài viết tập trung vào đối tượng/chủ đề này
+  hoặc sự kiện/chủ đề trực tiếp liên quan.
+- Các bài chỉ nhắc qua loa, hoặc nói về chủ đề khác, thì coi là liên quan thấp.
+
+Yêu cầu JSON:
+Trả về đúng cấu trúc:
+
+{{
+  "items": [
+    {{
+      "index": <số nguyên, giống index trong danh sách đầu vào>,
+      "score": <một số từ 0.0 đến 1.0, càng cao càng liên quan>
+    }},
+    ...
+  ]
+}}
+
+QUAN TRỌNG:
+- Không thêm text ngoài JSON.
+- Không bỏ sót bất kỳ index nào trong đầu vào.
+- Không tạo index mới.
+""".strip()
+
+    try:
+        resp = _model.generate_content(
+            prompt,
+            generation_config={
+                "max_output_tokens": 512,
+                "temperature": 0.2,
+            },
+        )
+    except Exception as e:
+        log.error("[gemini] rerank generate_content error: %s", e, exc_info=True)
+        return results[:max_results]
+
+    # Lấy text từ response
+    try:
+        raw_text = (getattr(resp, "text", "") or "").strip()
+    except Exception as e:
+        log.warning("[gemini] rerank resp.text error: %s", e)
+        raw_text = ""
+
+    if not raw_text:
+        log.error("[gemini] rerank empty resp.text -> skip rerank")
+        return results[:max_results]
+
+    log.info("[gemini] rerank_raw_preview=%r", raw_text[:200].replace("\n", " "))
+
+    # Cắt phần JSON trong text (phòng khi model thêm rác)
+    try:
+        start = raw_text.index("{")
+        end = raw_text.rindex("}") + 1
+        json_str = raw_text[start:end]
+    except ValueError:
+        json_str = raw_text
+
+    try:
+        data = json.loads(json_str)
+    except Exception as e:
+        log.error(
+            "[gemini] rerank JSON parse error: %s, json_str_preview=%r",
+            e,
+            json_str[:200],
+        )
+        return results[:max_results]
+
+    items_raw = data.get("items") or []
+    if not isinstance(items_raw, list):
+        log.error("[gemini] rerank 'items' không phải list -> skip rerank")
+        return results[:max_results]
+
+    # Map index -> score
+    scored: dict[int, float] = {}
+    for entry in items_raw:
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("index")
+        score = entry.get("score")
+        try:
+            idx_int = int(idx)
+        except Exception:
+            continue
+        if idx_int < 0 or idx_int >= max_candidates:
+            continue
+        try:
+            score_f = float(score)
+        except Exception:
+            continue
+
+        # Clamp score về [0, 1]
+        if score_f < 0.0:
+            score_f = 0.0
+        if score_f > 1.0:
+            score_f = 1.0
+
+        prev = scored.get(idx_int)
+        if prev is None or score_f > prev:
+            scored[idx_int] = score_f
+
+    if not scored:
+        log.warning("[gemini] rerank không tạo được score hợp lệ -> skip rerank")
+        return results[:max_results]
+
+    # Sắp xếp theo score giảm dần
+    pairs = sorted(scored.items(), key=lambda x: x[1], reverse=True)
+
+    filtered: List[SearchResult] = []
+    for idx_int, score_f in pairs:
+        if score_f < RERANK_LLM_MIN_SCORE:
+            continue
+
+        item = candidates[idx_int]
+
+        # Gắn score vào SearchResult để trả ra ngoài
+        try:
+            item.score = score_f
+        except Exception:
+            # Trong trường hợp cực đoan (schema không có field) thì bỏ qua
+            pass
+
+        filtered.append(item)
+        if len(filtered) >= max_results:
+            break
+
+    if not filtered:
+        log.info(
+            "[gemini] rerank: tất cả score < %.2f -> dùng kết quả gốc",
+            RERANK_LLM_MIN_SCORE,
+        )
+        return results[:max_results]
+
+    # Log chi tiết top N để debug
+    try:
+        top_detail = ", ".join(
+            f"{idx}:{scored[idx]:.2f}"
+            for idx, _ in pairs[: min(len(pairs), 10)]
+        )
+        log.info("[gemini] rerank_top detail=%s", top_detail)
+    except Exception:
+        pass
+
+    log.info(
+        "[gemini] rerank: used=%d/%d candidates, kept=%d, min_score=%.2f, max_score=%.2f",
+        len(candidates),
+        len(results),
+        len(filtered),
+        min(s for _, s in pairs),
+        max(s for _, s in pairs),
+    )
+    return filtered
 
 
 def _build_default_summary(

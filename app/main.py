@@ -4,8 +4,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from schemas import ResearchRequest, ResearchResponse
-from services.ai_service import generate_topic_summary
+from services.ai_service import (
+    generate_topic_summary,
+    rerank_search_results_with_llm,   # NEW
+)
 from services.searxng_service import search_web_with_searxng
+
 
 # Cấu hình log chung
 logging.basicConfig(
@@ -27,7 +31,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.get("/health")
 def health_check():
@@ -74,15 +77,43 @@ def run_research(payload: ResearchRequest):
 
     # 2) SearXNG: chỉ dùng search_query
     try:
+        # Lấy nhiều hơn 1 chút để LLM có cái mà rerank
+        raw_max_results = min(payload.max_results * 3, 40)
+
         results = search_web_with_searxng(
             query=search_query,
             language=payload.language,
-            max_results=payload.max_results,
+            max_results=raw_max_results,
         )
         log.info("[api] searxng_results=%d", len(results))
     except Exception as e:
         log.error("[api] SearXNG error: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Lỗi gọi SearXNG: {e}")
+
+    # 2b) Rerank bằng LLM
+    try:
+        reranked = rerank_search_results_with_llm(
+            name=payload.name,
+            object_type=payload.object_type,
+            short_description=payload.short_description,
+            language=payload.language,
+            search_query=search_query,
+            results=results,
+            max_results=payload.max_results,
+        )
+        log.info(
+            "[api] rerank_llm_results before=%d after=%d",
+            len(results),
+            len(reranked),
+        )
+        results = reranked
+    except Exception as e:
+        log.error(
+            "[api] rerank LLM error: %s -> dùng kết quả gốc",
+            e,
+            exc_info=True,
+        )
+        # giữ nguyên results
 
     # 3) Trả về cho frontend + crawler
     return ResearchResponse(

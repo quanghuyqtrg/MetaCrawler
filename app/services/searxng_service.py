@@ -36,8 +36,9 @@ def search_web_with_searxng(
         "q": query,
         "format": "json",
         "language": language or SEARXNG_DEFAULT_LANGUAGE,
-        "categories": categories or SEARXNG_DEFAULT_CATEGORIES,
     }
+    if categories:
+        params["categories"] = categories
 
     log.info(
         "[searxng] search url=%s lang=%s max_results=%d q_preview=%r",

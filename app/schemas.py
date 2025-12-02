@@ -29,6 +29,7 @@ class SearchResult(BaseModel):
     url: HttpUrl | str
     description: Optional[str] = None
     published_date: Optional[str] = None  # để string, crawler tự xử lý
+    score: Optional[float] = Field(None, description="Điểm liên quan sau bước rerank (0.0–1.0); None nếu chưa rerank")
 
 
 class ResearchResponse(BaseModel):
@@ -39,4 +40,3 @@ class ResearchResponse(BaseModel):
     key_points: List[str]                  # 3–5 bullet
     search_query: str                      # query ngắn cho SearXNG
     search_results: List[SearchResult]
-    crawler_payload: List[SearchResult]
