@@ -119,11 +119,16 @@ async def run_research(payload: ResearchRequest):
 
     # 3) Crawl content (Top N)
     try:
-        # Lấy số lượng URL tối đa từ env (mặc định 5)
+        # Lấy số lượng URL tối đa từ env (mặc định 5). 0 = tất cả.
         crawl_limit = int(os.getenv("CRAWL_MAX_RESULTS", "5"))
         
-        # Lấy tối đa N URL đầu tiên để crawl
-        top_urls = [r.url for r in results[:crawl_limit] if r.url]
+        if crawl_limit > 0:
+            results_to_crawl = results[:crawl_limit]
+        else:
+            results_to_crawl = results
+
+        # Lấy danh sách URL
+        top_urls = [r.url for r in results_to_crawl if r.url]
         if top_urls:
             log.info("[api] crawling %d urls...", len(top_urls))
             crawled_data = await crawl_urls(top_urls)
