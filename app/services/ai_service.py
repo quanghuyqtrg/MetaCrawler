@@ -604,3 +604,85 @@ def generate_topic_summary(
         )
 
     return overview, key_points, search_query
+
+
+def summarize_crawled_data(
+    name: str,
+    object_type: str,
+    crawled_contents: List[str],
+    language: str = "vi",
+) -> Tuple[str, List[str]]:
+    """
+    Dùng Gemini để tổng hợp thông tin từ nội dung đã crawl (RAG).
+    Trả về: (overview, key_points)
+    """
+    if not crawled_contents or _model is None:
+        return "", []
+
+    # Giới hạn context: Lấy tối đa 5 bài, mỗi bài lấy 4000 ký tự đầu
+    # Để tránh quá tải token và chi phí
+    # Lọc bỏ các bài quá ngắn (< 200 ký tự) vì có thể là lỗi/rác
+    valid_contents = [c for c in crawled_contents if c and len(c.strip()) > 200]
+    limited_contents = [c[:4000] for c in valid_contents[:5]]
+    
+    if not limited_contents:
+        log.warning("[gemini] summarize_crawled_data: no valid content > 200 chars")
+        return "", []
+
+    context_text = "\n\n---\n\n".join(limited_contents)
+    
+    lang_label = "Tiếng Việt" if language.startswith("vi") else language
+
+    prompt = f"""
+    Bạn là chuyên gia phân tích thông tin. Dựa vào các văn bản được cung cấp dưới đây, hãy viết một bản tóm tắt tổng quan về đối tượng:
+
+    Đối tượng: {name} ({object_type})
+    Ngôn ngữ đầu ra: {lang_label}
+
+    Dữ liệu tham khảo (Context):
+    {context_text}
+
+    Yêu cầu đầu ra (JSON):
+    {{
+      "overview": "Đoạn văn tổng quan (khoảng 5-8 câu) đúc kết thông tin quan trọng nhất. Phải tuyệt đối trung thực với dữ liệu, kiểm chứng chéo các thông tin mâu thuẫn (chọn thông tin xuất hiện nhiều nhất hoặc từ nguồn uy tín). Tránh các câu văn sáo rỗng, khen ngợi chung chung (ví dụ: 'nguồn cảm hứng', 'tấm gương sáng') trừ khi có chi tiết cụ thể.",
+      "key_points": [
+        "5-7 điểm chính nổi bật nhất, ưu tiên các sự kiện, số liệu, mốc thời gian cụ thể. Tránh thông tin mơ hồ."
+      ]
+    }}
+    
+    Lưu ý:
+    - Nếu dữ liệu tham khảo không đủ thông tin, hãy nói rõ trong overview.
+    - Chỉ trả về JSON hợp lệ.
+    """
+
+    log.info("[gemini] summarize_crawled_data name=%s docs=%d", name, len(limited_contents))
+
+    try:
+        resp = _model.generate_content(
+            prompt,
+            generation_config={
+                "max_output_tokens": 1024,
+                "temperature": 0.2,
+            },
+        )
+        raw_text = (getattr(resp, "text", "") or "").strip()
+        
+        # Extract JSON
+        try:
+            start = raw_text.index("{")
+            end = raw_text.rindex("}") + 1
+            json_str = raw_text[start:end]
+            data = json.loads(json_str)
+            
+            overview = data.get("overview", "")
+            key_points = data.get("key_points", [])
+            
+            return overview, key_points
+        except Exception:
+            log.warning("[gemini] summarize_crawled_data JSON parse fail, raw=%r", raw_text[:200])
+            return "", []
+            
+    except Exception as e:
+        log.error("[gemini] summarize_crawled_data error: %s", e)
+        return "", []
+

@@ -173,7 +173,7 @@ ui:
 #
 outgoing:
   # default timeout in seconds, can be override by engine
-  request_timeout: 3.0
+  request_timeout: 10.0
   # the maximum timeout in seconds
   # max_request_timeout: 10.0
   # suffix of searxng_useragent, could contain information like an email address
@@ -348,6 +348,7 @@ engines:
     shortcut: 360sov
     disabled: true
 
+
   - name: 9gag
     engine: 9gag
     shortcut: 9g
@@ -501,7 +502,9 @@ engines:
     categories: [general]
     engine: baidu
     shortcut: bd
-    disabled: true
+    disabled: false
+
+
 
   - name: baidu images
     baidu_category: images

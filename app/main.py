@@ -8,9 +8,10 @@ from schemas import ResearchRequest, ResearchResponse
 from services.ai_service import (
     generate_topic_summary,
     rerank_search_results_with_llm,   # NEW
+    summarize_crawled_data,           # NEW RAG
 )
 from services.searxng_service import search_web_with_searxng
-from services.crawler_service import crawl_urls
+from services.crawler_service import crawl_urls, is_valid_url
 
 
 # Cấu hình log chung
@@ -127,20 +128,43 @@ async def run_research(payload: ResearchRequest):
         else:
             results_to_crawl = results
 
-        # Lấy danh sách URL
-        top_urls = [r.url for r in results_to_crawl if r.url]
+        # Lấy danh sách URL (đã lọc rác)
+        top_urls = [r.url for r in results_to_crawl if r.url and is_valid_url(r.url)]
         if top_urls:
             log.info("[api] crawling %d urls...", len(top_urls))
             crawled_data = await crawl_urls(top_urls)
             
             # Map content back to results
+            crawled_texts = []
             for r in results:
                 if str(r.url) in crawled_data:
-                    r.content = crawled_data[str(r.url)]
-            log.info("[api] crawl finished")
+                    content = crawled_data[str(r.url)]
+                    r.content = content
+                    if content:
+                        crawled_texts.append(content)
+            
+            log.info("[api] crawl finished. Got %d contents.", len(crawled_texts))
+
+            # 3b) RAG: Tóm tắt lại dựa trên dữ liệu crawl (nếu có)
+            if crawled_texts:
+                log.info("[api] Generating RAG description...")
+                rag_overview, rag_points = summarize_crawled_data(
+                    name=payload.name,
+                    object_type=payload.object_type,
+                    crawled_contents=crawled_texts,
+                    language=payload.language,
+                )
+                if rag_overview:
+                    description = rag_overview
+                    log.info("[api] RAG description updated")
+                if rag_points:
+                    key_points = rag_points
+                    log.info("[api] RAG key_points updated")
+
     except Exception as e:
         log.error("[api] Crawler error: %s", e, exc_info=True)
         # Không raise error, chỉ log, vẫn trả về kết quả search
+
 
     # 4) Trả về cho frontend + crawler
     return ResearchResponse(
