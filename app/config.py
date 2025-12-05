@@ -23,3 +23,7 @@ class SearchResult(BaseModel):
     published_date: Optional[str] = None
 
 
+
+# Jina AI API Key (optional, if not provided will fallback to local extraction)
+import os
+JINA_API_KEY = os.getenv("JINA_API_KEY", "")
