@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import re
 from typing import List, Optional, Dict, Any
 
 import httpx
@@ -36,7 +37,9 @@ def get_user_agent_headers() -> Dict[str, str]:
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
+        # Tránh brotli (br) vì httpx chỉ giải nén khi có thêm dependency brotli.
+        # Một số site trả về br khiến nội dung bị rác nếu không giải nén.
+        "Accept-Encoding": "gzip, deflate",
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1"
@@ -140,9 +143,14 @@ async def fetch_html(client: httpx.AsyncClient, url: str) -> str:
         # We need text. Attempt decode
         charset = response.encoding or "utf-8"
         try:
-            return body.decode(charset, errors="replace")
+            text = body.decode(charset, errors="replace")
+            # Validation: Strip null bytes and control chars to prevent XML compatibility errors
+            # XML 1.0 valid chars: #x9 | #xA | #xD | [#x20-#xD7FF] | ...
+            # We strip anything in range 0x00-0x1F causing issues (except 9, A, D)
+            return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
         except:
-             return body.decode("utf-8", errors="replace")
+             text = body.decode("utf-8", errors="replace")
+             return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
              
     raise ValueError("Too many redirects")
 
@@ -303,7 +311,9 @@ async def fetch_with_jina(client: httpx.AsyncClient, url: str) -> str:
     jina_url = f"https://r.jina.ai/{url}"
     headers = {
         "Authorization": f"Bearer {JINA_API_KEY}",
-        "X-Return-Format": "markdown"
+        "X-Return-Format": "markdown",
+        # Ép gzip/deflate để tránh brotli trả về byte rác nếu thiếu dependency.
+        "Accept-Encoding": "gzip, deflate",
     }
     # Jina timeout có thể cần lâu hơn chút
     response = await client.get(jina_url, headers=headers, timeout=20)
