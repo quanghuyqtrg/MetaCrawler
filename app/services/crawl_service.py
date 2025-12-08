@@ -5,7 +5,6 @@ from typing import List, Optional, Dict, Any
 
 import httpx
 import trafilatura
-from fake_useragent import UserAgent
 from readability import Document
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from markdownify import markdownify as md
@@ -15,21 +14,33 @@ from schemas import CrawlResult
 log = logging.getLogger(__name__)
 
 # Cấu hình timeout và limit
-TIMEOUT_SECONDS = 10
+TIMEOUT_SECONDS = 15
+# MAX_CONTENT_LENGTH = 30000 
+MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024  # 5MB limit for HTML download
 
-def get_user_agent_headers():
+import random
+
+# Optimized Static User Agents & Headers
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+]
+
+def get_user_agent_headers() -> Dict[str, str]:
     """
-    Safe UserAgent generation with fallback
+    Return optimized headers with random UA to avoid blocking
     """
-    try:
-        from fake_useragent import UserAgent
-        # Fallback string
-        fallback = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        ua = UserAgent(fallback=fallback)
-        return {"User-Agent": ua.random}
-    except Exception:
-         # Hard fallback if library really fails
-        return {"User-Agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
+    }
 
 
 import socket
@@ -53,17 +64,17 @@ def validate_url(url: str) -> None:
         raise ValueError("Invalid hostname")
         
     try:
-        # Resolve IP
-        ip_str = socket.gethostbyname(hostname)
-        ip = ipaddress.ip_address(ip_str)
-        
-        # Check IP ranges
-        if ip.is_private or ip.is_loopback or ip.is_link_local:
-            raise ValueError(f"Blocked access to private/local IP: {ip_str} ({hostname})")
-            
-        # Optional: Chặn cụ thể các dải mây (aws metadata) nếu cần
-        # if str(ip) == "169.254.169.254": raise ...
-        
+        # Resolve ALL addresses (IPv4/IPv6) and block any non-public range
+        addrinfos = socket.getaddrinfo(hostname, parsed.port or 80, proto=socket.IPPROTO_TCP)
+        if not addrinfos:
+            raise ValueError(f"Could not resolve hostname: {hostname}")
+        for ai in addrinfos:
+            ip_str = ai[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                raise ValueError(f"Blocked access to private/local IP: {ip_str} ({hostname})")
+            # Optional: block other sensitive ranges if needed
+            # if str(ip) == "169.254.169.254": ...
     except socket.gaierror:
         raise ValueError(f"Could not resolve hostname: {hostname}")
     except ValueError as e:
@@ -80,51 +91,129 @@ def validate_url(url: str) -> None:
 )
 async def fetch_html(client: httpx.AsyncClient, url: str) -> str:
     """
-    Tải HTML từ URL với retry và fake user-agent.
+    Tải HTML từ URL với streaming, size limit và xử lý redirect thủ công để check SSRF.
     """
+    current_url = url
     headers = get_user_agent_headers()
-    response = await client.get(url, headers=headers, follow_redirects=True)
-    response.raise_for_status()
     
-    # Kiểm tra content-type
-    content_type = response.headers.get("content-type", "").lower()
-    if "text/html" not in content_type:
-        raise ValueError(f"Skipped: Content-Type is {content_type}, not text/html")
+    # Manual redirect handling (max 5 redirects)
+    for _ in range(5):
+        # Validate Current URL Before Fetching
+        validate_url(current_url)
         
-    return response.text
+        # Stream request to check headers and size
+        request = client.build_request("GET", current_url, headers=headers)
+        response = await client.send(request, stream=True)
+        
+        # Handle Redirects
+        if response.is_redirect:
+            await response.aclose()
+            next_url = response.headers.get("location")
+            if not next_url:
+                break
+            # Handle relative URLs if needed, but httpx usually handles parsing. 
+            # We assume abs url or let library help if we used follow_redirects=True (but we can't here safely)
+            # Simple resolve:
+            from urllib.parse import urljoin
+            current_url = urljoin(current_url, next_url)
+            continue
+            
+        # If not redirect, check status
+        response.raise_for_status()
+        
+        # Check Content-Type
+        content_type = response.headers.get("content-type", "").lower()
+        if "text/html" not in content_type and "text/plain" not in content_type:
+             await response.aclose()
+             raise ValueError(f"Skipped: Content-Type is {content_type}")
+
+        # Download with Size Limit
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+            if len(body) > MAX_DOWNLOAD_SIZE:
+                await response.aclose()
+                raise ValueError(f"Aborted: Content size exceeded {MAX_DOWNLOAD_SIZE} bytes")
+        
+        await response.aclose()
+        # Decode manually or let helper
+        # We need text. Attempt decode
+        charset = response.encoding or "utf-8"
+        try:
+            return body.decode(charset, errors="replace")
+        except:
+             return body.decode("utf-8", errors="replace")
+             
+    raise ValueError("Too many redirects")
 
 
 def extract_content(html: str, url: str) -> Dict[str, Any]:
     """
     Trích xuất nội dung dùng trafilatura và readability.
-    So sánh kết quả để chọn bản markdown có nhiều ảnh nhất (tốt cho AI sinh chart).
+    - Title/Desc: Lấy chéo từ nhiều nguồn (Meta tags > Trafilatura > Readability).
+    - Content: Pure text (không ảnh).
+    - Content_Markdown: Rich text (có ảnh).
     """
-    # 1. Trafilatura: Metadata, Clean Text, Markdown (include_images=True)
-    # Lấy JSON để có metadata & clean text
-    json_result = trafilatura.extract(
+    import lxml.html
+    from lxml import etree
+
+    # 0. Parse HTML bằng lxml để lấy raw metadata
+    try:
+        tree = lxml.html.fromstring(html)
+        
+        # Helper lấy meta
+        def get_meta(props):
+            for p in props:
+                # support property="..." or name="..."
+                # xpath: //meta[@property='p' or @name='p']/@content
+                res = tree.xpath(f"//meta[@property='{p}' or @name='{p}']/@content")
+                if res:
+                    return str(res[0]).strip()
+            return None
+
+        meta_title = get_meta(["og:title", "twitter:title"])
+        meta_desc = get_meta(["og:description", "twitter:description", "description"])
+        meta_image = get_meta(["og:image", "twitter:image"])
+    except Exception:
+        meta_title = meta_desc = meta_image = None
+        tree = None
+
+    # 1. Trafilatura:
+    # 1a. Pure text (NO images) -> cho field 'content'
+    clean_text = trafilatura.extract(
         html,
         url=url,
         include_comments=False,
         include_tables=False,
-        include_images=True, 
+        include_images=False, # STRICTLY NO IMAGES
+        output_format="txt",
+        with_metadata=False
+    )
+
+    # 1b. Struct & XML -> để lấy metadata khác của Trafilatura
+    # (Dùng json output để lấy full fields)
+    traf_json_str = trafilatura.extract(
+        html,
+        url=url,
+        include_comments=False, 
+        include_images=False,
         output_format="json",
         with_metadata=True
     )
-    
-    data = {}
-    if json_result:
+    traf_data = {}
+    if traf_json_str:
         try:
-            data = json.loads(json_result)
-        except Exception:
+            traf_data = json.loads(traf_json_str)
+        except:
             pass
-
-    # Lấy Markdown riêng từ Trafilatura
+            
+    # 1c. Markdown (Images INCLUDED) -> cho field 'content_markdown'
     traf_markdown = trafilatura.extract(
         html,
         url=url,
         include_comments=False,
         include_tables=False,
-        include_images=True,
+        include_images=True, # KEEP IMAGES
         output_format="markdown",
         with_metadata=False
     ) or ""
@@ -132,68 +221,69 @@ def extract_content(html: str, url: str) -> Dict[str, Any]:
     # 2. Readability + Markdownify (Fallback/Alternative)
     doc = Document(html)
     summary_html = doc.summary() 
-    title = doc.title()
+    readability_title = doc.title()
     
-    # Convert HTML -> Markdown
-    # strip=["a"] -> giữ lại thẻ a nếu cần, nhưng user quan trọng ảnh
+    # 3. Tổng hợp Title / Description / Metadata
+    # Priority: Meta Tags > Trafilatura > Readability
+    final_title = meta_title or traf_data.get("title") or readability_title or "No Title"
+    
+    # Description: Meta Tags > Trafilatura
+    final_desc = meta_desc or traf_data.get("description") or None
+    
+    # 4. Content Logic
+    # Dùng clean_text của Trafilatura làm gốc. Nếu fail thì fallback sang Readability.
+    final_pure_content = clean_text
+    
+    if not final_pure_content:
+        # Fallback lấy text từ readability
+        try:
+             final_pure_content = lxml.html.fromstring(summary_html).text_content().strip()
+        except:
+             final_pure_content = ""
+
+    # Cleaning artifacts (Published time, authors often leak into start of text)
+    # Simple heuristic regex replacement can be added here if needed, 
+    # but Trafilatura generally handles this well in 'txt' mode.
+    
+    # 5. Content Markdown Logic
+    # Tương tự cũ: so sánh ảnh để chọn bản rich nhất
+    # Convert Readability HTML -> Markdown
     rich_markdown = md(summary_html, heading_style="ATX") or ""
     
-    # 3. Decision Logic: Chọn markdown nào?
-    # Đếm số thẻ ảnh ![](...)
     traf_imgs = traf_markdown.count("![")
     rich_imgs = rich_markdown.count("![")
     
-    # Mặc định ưu tiên Trafilatura vì structure tốt hơn
-    # Nhưng nếu Readability lấy được nhiều ảnh hơn đáng kể (vd > 1) thì dùng Readability
     if rich_imgs > traf_imgs:
-        final_markdown = rich_markdown
+        final_markdown_body = rich_markdown
     else:
-        final_markdown = traf_markdown
+        final_markdown_body = traf_markdown
         
-    # Nếu cả 2 đều rỗng text (lỗi extract), fallback sang cái còn lại có text
-    if not final_markdown.strip():
-        final_markdown = rich_markdown if rich_markdown.strip() else traf_markdown
+    if not final_markdown_body.strip():
+        final_markdown_body = rich_markdown if rich_markdown.strip() else (final_pure_content or "")
 
-    # Metadata & Clean Text
-    final_title = data.get("title") or title
-    clean_text = data.get("text")
-    if not clean_text:
-        # Fallback clean text từ Readability
-        import lxml.html
-        try:
-             clean_text = lxml.html.fromstring(summary_html).text_content().strip()
-        except:
-             clean_text = ""
-             
-    # Format Header cho content_markdown theo yêu cầu user
-    # Title: ...
-    # URL Source: ...
-    # Published Time: ...
-    # Markdown Content: ...
-    pub_date = data.get("date") or "Unknown"
-    source_url = url
+    # Format Header cho markdown
+    pub_date = traf_data.get("date") or "Unknown"
     
     header_info = (
-        f"Title: {final_title}\n\n"
-        f"URL Source: {source_url}\n\n"
+        f"Title: {final_title}\n"
+        f"URL Source: {url}\n"
         f"Published Time: {pub_date}\n\n"
         f"Markdown Content:\n"
     )
-    
-    final_markdown_with_header = header_info + final_markdown
+    final_markdown_with_header = header_info + final_markdown_body
 
     return {
         "title": final_title,
-        "description": data.get("description"),
-        "content": clean_text,  
-        "content_markdown": final_markdown_with_header, 
+        "description": final_desc,
+        "content": final_pure_content,  # CLEAN TEXT ONLY
+        "content_markdown": final_markdown_with_header, # RICH WITH IMAGES
         "metadata": {
-            "author": data.get("author"),
-            "date": data.get("date"),
-            "sitename": data.get("sitename"),
-            "categories": data.get("categories"),
-            "tags": data.get("tags"),
-            "image": data.get("image"), 
+            "author": traf_data.get("author"),
+            "date": pub_date,
+            "sitename": traf_data.get("sitename"),
+            "categories": traf_data.get("categories"),
+            "tags": traf_data.get("tags"),
+            "image": meta_image or traf_data.get("image"), 
         }
     }
 
@@ -223,83 +313,116 @@ async def fetch_with_jina(client: httpx.AsyncClient, url: str) -> str:
 
 async def process_url(client: httpx.AsyncClient, url: str) -> CrawlResult:
     """
-    Xử lý 1 URL: 
-    1. Validate URL (Security).
-    2. Thử Jina AI (nếu có key).
-    3. Fallback: fetch -> extract (Trafilatura/Readability).
+    Xử lý 1 URL theo chiến lược Hybrid:
+    1. Local Extraction (Priority for Title, Desc, Pure Content, Metadata).
+    2. Jina AI (Priority for Markdown Content).
+    
+    Chạy song song 2 luồng để tối ưu tốc độ.
     """
     try:
         validate_url(url)
     except ValueError as e:
         return CrawlResult(url=url, status="error", error_message=str(e))
 
-    # Cách 1: Jina AI
-    if JINA_API_KEY:
+    # Task 1: Jina AI (Markdown)
+    async def task_jina():
+        if not JINA_API_KEY:
+            return None
         try:
-            # log.info(f"Trying Jina for {url}")
-            md_content = await fetch_with_jina(client, url)
-            
-            # Simple Title Extraction (First line # Title)
-            lines = md_content.strip().split('\n')
-            title = "Unknown"
-            if lines and lines[0].startswith('# '):
-                title = lines[0][2:].strip()
-            
-            # Format Header (Jina doesn't give Date in headers usually, so Unknown or parse??)
-            # Để đơn giản ta để Unknown hoặc None
-            header_info = (
-                f"Title: {title}\n\n"
-                f"URL Source: {url}\n\n"
+            return await fetch_with_jina(client, url)
+        except Exception as e:
+            log.warning(f"Jina failed for {url}: {e}")
+            return None
+
+    # Task 2: Local Extraction (HTML -> Metadata, Clean Text, Fallback Markdown)
+    async def task_local():
+        try:
+            html = await fetch_html(client, url)
+            return extract_content(html, url)
+        except Exception as e:
+            # Nếu fetch HTML lỗi thì coi như task local fail
+            log.warning(f"Local fetch/extract failed for {url}: {e}")
+            return e # Trả về exception để check sau
+
+    # Chạy song song
+    # return_exceptions=True để 1 bên chết bên kia vẫn sống
+    results = await asyncio.gather(task_jina(), task_local(), return_exceptions=True)
+    
+    jina_res = results[0]
+    local_res = results[1]
+
+    # Kiểm tra kêt quả Local
+    # local_res có thể là Dict (success), Exception (error), hoặc None (unknown)
+    if isinstance(local_res, Exception):
+        # Nếu local fail, ta kiểm tra xem Jina có cứu được không?
+        # Nếu Jina có trả về markdown, ta có thể tạo result tạm từ Jina
+        if isinstance(jina_res, str) and jina_res:
+             log.info(f"Local fail, fallback to Jina for {url}")
+             # Parse sơ title từ Jina markdown
+             lines = jina_res.strip().split('\n')
+             title = "Unknown"
+             if lines and lines[0].startswith('# '):
+                 title = lines[0][2:].strip()
+                 
+             header_info = (
+                f"Title: {title}\n"
+                f"URL Source: {url}\n"
                 f"Published Time: Unknown\n\n"
                 f"Markdown Content:\n"
-            )
-            final_md = header_info + md_content
-            
-            # Content text (clean) -> strip markdown? 
-            # Dùng markdown to text đơn giản hoặc để nguyên markdown
-            # Trafilatura extract text thì tốt hơn, nhưng ở đây dùng Jina là chính
-            # Ta có thể dùng md_content làm content tạm
-            
-            return CrawlResult(
+             )
+             return CrawlResult(
                 url=url,
                 status="ok",
                 title=title,
                 description=None,
-                content=md_content, # Jina return markdown as content text too? Or keep html free.
-                content_markdown=final_md,
-                metadata={"source": "jina"}
+                content=jina_res, # Jina text as content
+                content_markdown=header_info + jina_res,
+                metadata={"source": "jina_fallback_only"}
             )
-            
-        except Exception as e:
-            log.warning(f"Jina failed for {url}: {e}. Fallback to local extraction.")
-            # Fallback continues below...
+        else:
+             # Cả 2 đều fail
+             return CrawlResult(url=url, status="error", error_message=str(local_res))
 
-    # Cách 2: Local Extraction (Fallback)
-    try:
-        html = await fetch_html(client, url)
-        data = extract_content(html, url)
-        
-        # Cắt ngắn nếu quá dài
-        content = data.get("content") or ""
-        if len(content) > MAX_CONTENT_LENGTH:
-            content = content[:MAX_CONTENT_LENGTH] + "...(truncated)"
-            
-        return CrawlResult(
-            url=url,
-            status="ok",
-            title=data.get("title"),
-            description=data.get("description"),
-            content=content,
-            content_markdown=data.get("content_markdown"),
-            metadata=data.get("metadata")
+    # Nếu code chạy tới đây, Local thành công (trả về dict)
+    local_data: Dict[str, Any] = local_res
+    
+    # Merge Logic
+    # 1. Title/Desc/Metadata: Ưu tiên Local (vì lxml lấy từ meta tags chuẩn hơn Jina tự đoán)
+    # 2. Content: Ưu tiên Local (Pure text config)
+    # 3. Markdown: Ưu tiên Jina (Rich & Clean Layout)
+    
+    final_title = local_data.get("title")
+    final_desc = local_data.get("description")
+    final_content = local_data.get("content") # Pure text
+    final_metadata = local_data.get("metadata", {})
+    
+    # Xử lý Markdown
+    if isinstance(jina_res, str) and jina_res.strip():
+        # Có kết quả từ Jina -> Dùng làm content_markdown chính
+        # Vẫn wrap header thống nhất
+        pub_date = final_metadata.get("date") or "Unknown"
+        header_info = (
+            f"Title: {final_title}\n"
+            f"URL Source: {url}\n"
+            f"Published Time: {pub_date}\n\n"
+            f"Markdown Content:\n"
         )
+        final_markdown = header_info + jina_res
+        final_metadata["markdown_source"] = "jina"
+    else:
+        # Jina fail/empty -> Fallback về Markdown của Local (Trafilatura)
+        final_markdown = local_data.get("content_markdown")
+        final_metadata["markdown_source"] = "local"
         
-    except ValueError as ve:
-        # Lỗi logic (vd content type sai)
-        return CrawlResult(url=url, status="skipped", error_message=str(ve))
-    except Exception as e:
-        # Lỗi network hoặc parse
-        return CrawlResult(url=url, status="error", error_message=str(e))
+    return CrawlResult(
+        url=url,
+        status="ok",
+        title=final_title,
+        description=final_desc,
+        content=final_content,
+        content_markdown=final_markdown,
+        metadata=final_metadata
+    )
 
 
 async def crawl_urls(urls: List[str], max_workers: int = 5) -> List[CrawlResult]:
@@ -307,7 +430,15 @@ async def crawl_urls(urls: List[str], max_workers: int = 5) -> List[CrawlResult]
     Hàm chính: crawl danh sách URL song song.
     """
     limits = httpx.Limits(max_keepalive_connections=max_workers, max_connections=max_workers)
+    
+    # Sử dụng Semaphore để giới hạn số lượng task chạy thực sự cùng lúc (logic level)
+    sem = asyncio.Semaphore(max_workers)
+
+    async def sem_process(c, u):
+        async with sem:
+            return await process_url(c, str(u))
+
     async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, limits=limits) as client:
-        tasks = [process_url(client, str(url)) for url in urls]
+        tasks = [sem_process(client, url) for url in urls]
         results = await asyncio.gather(*tasks)
         return results
