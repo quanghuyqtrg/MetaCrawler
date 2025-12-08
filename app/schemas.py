@@ -54,7 +54,7 @@ class CrawlResult(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     content: Optional[str] = None
-    content_markdown: Optional[str] = None
+    # content_markdown: Optional[str] = None
     error_message: Optional[str] = None
     metadata: Optional[dict] = None
 

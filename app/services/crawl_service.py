@@ -376,7 +376,7 @@ async def process_url(client: httpx.AsyncClient, url: str) -> CrawlResult:
                 title=title,
                 description=None,
                 content=jina_res, # Jina text as content
-                content_markdown=header_info + jina_res,
+                # content_markdown=header_info + jina_res,
                 metadata={"source": "jina_fallback_only"}
             )
         else:
@@ -420,7 +420,7 @@ async def process_url(client: httpx.AsyncClient, url: str) -> CrawlResult:
         title=final_title,
         description=final_desc,
         content=final_content,
-        content_markdown=final_markdown,
+        # content_markdown=final_markdown,
         metadata=final_metadata
     )
 
