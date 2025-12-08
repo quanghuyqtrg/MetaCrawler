@@ -256,7 +256,7 @@ print(f"Search Results: {len(data['search_results'])} results found")
 
 **Parameters**:
 - `urls` (array of strings, required): Danh sách các URL cần cào dữ liệu (max 50 URL)
-- `max_workers` (integer, optional): Số lượng luồng xử lý song song (1-10) - mặc định: `5`
+- `max_workers` (integer, optional): Số lượng luồng xử lý song song (1-10) - mặc định: `10`
 
 **Response**:
 ```json
