@@ -45,7 +45,7 @@ class ResearchResponse(BaseModel):
 
 class CrawlRequest(BaseModel):
     urls: List[HttpUrl] = Field(..., description="Danh sách URL cần crawl", min_length=1, max_length=50)
-    max_workers: int = Field(5, ge=1, le=10, description="Số lượng worker tải song song")
+    max_workers: int = Field(10, ge=1, le=10, description="Số lượng worker tải song song")
 
 
 class CrawlResult(BaseModel):
