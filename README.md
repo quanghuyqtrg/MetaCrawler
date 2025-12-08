@@ -29,6 +29,7 @@ graph LR
 - **Backend Framework**: FastAPI 0.115.0
 - **AI Service**: Google Generative AI (Gemini 2.5 Flash Lite)
 - **Search Engine**: SearXNG (self-hosted meta search)
+- **Content Extraction**: Hybrid (Local Trafilatura + Jina AI)
 - **Language**: Python 3.12
 - **Container**: Docker & Docker Compose
 - **Validation**: Pydantic 2.9.2
@@ -38,6 +39,7 @@ graph LR
 - Python 3.12 hoặc cao hơn
 - Docker & Docker Compose (nếu chạy bằng container)
 - Google Gemini API key (đăng ký miễn phí tại [Google AI Studio](https://makersuite.google.com/app/apikey))
+- Jina AI API key (đăng ký tại [Jina AI](https://jina.ai/) - Optional)
 
 ## 🚀 Cài đặt
 
@@ -67,6 +69,9 @@ SEARXNG_DEFAULT_LANGUAGE=vi
 SEARXNG_DEFAULT_CATEGORIES=news
 SEARXNG_TIMEOUT=20
 SEARCH_QUERY_MAX_LEN=260
+
+# Jina AI (Optional - Recommended for better Markdown)
+JINA_API_KEY=jina_...
 ```
 
 > ⚠️ **Lưu ý**: Khi chạy với Docker Compose, `SEARXNG_BASE_URL` phải là `http://searxng:8080` (service name trong docker-compose.yml)
@@ -120,6 +125,7 @@ SEARXNG_DEFAULT_LANGUAGE=vi
 SEARXNG_DEFAULT_CATEGORIES=news
 SEARXNG_TIMEOUT=20
 SEARCH_QUERY_MAX_LEN=260
+JINA_API_KEY=jina_...
 ```
 
 5. **Khởi động SearXNG** (cần Docker):
@@ -233,6 +239,62 @@ print(f"Key Points: {data['key_points']}")
 print(f"Search Results: {len(data['search_results'])} results found")
 ```
 
+### Crawl API
+
+**Endpoint**: `POST /api/crawl`
+
+**Request Body**:
+```json
+{
+  "urls": [
+    "https://vi.wikipedia.org/wiki/Trí_tuệ_nhân_tạo",
+    "https://example.com/article"
+  ],
+  "max_workers": 5
+}
+```
+
+**Parameters**:
+- `urls` (array of strings, required): Danh sách các URL cần cào dữ liệu (max 50 URL)
+- `max_workers` (integer, optional): Số lượng luồng xử lý song song (1-10) - mặc định: `5`
+
+**Response**:
+```json
+{
+  "results": [
+    {
+      "url": "https://vi.wikipedia.org/wiki/Trí_tuệ_nhân_tạo",
+      "status": "ok",
+      "title": "Trí tuệ nhân tạo – Wikipedia tiếng Việt",
+      "description": "Trí tuệ nhân tạo hay trí thông minh nhân tạo...",
+      "content": "Trí tuệ nhân tạo (tiếng Anh: artificial intelligence...",
+      "metadata": {
+        "author": null,
+        "date": "2023-12-01",
+        "sitename": "Wikipedia",
+        "image": "https://upload.wikimedia.org/..."
+      }
+    },
+    {
+      "url": "https://example.com/error-page",
+      "status": "error",
+      "error_message": "404 Not Found"
+    }
+  ]
+}
+```
+
+### Ví dụ Crawl với cURL
+
+```bash
+curl -X POST "http://localhost:8010/api/crawl" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "urls": ["https://dantri.com.vn", "https://vnexpress.net"],
+    "max_workers": 3
+  }'
+```
+
 ## 🔧 Cấu hình
 
 ### Environment Variables
@@ -246,6 +308,7 @@ print(f"Search Results: {len(data['search_results'])} results found")
 | `SEARXNG_DEFAULT_CATEGORIES` | Danh mục tìm kiếm mặc định | `news` | ❌ |
 | `SEARXNG_TIMEOUT` | Timeout khi gọi SearXNG (giây) | `20` | ❌ |
 | `SEARCH_QUERY_MAX_LEN` | Độ dài tối đa của search query | `260` | ❌ |
+| `JINA_API_KEY` | API Key Jina (để convert Markdown đẹp) | - | ❌ |
 
 ### SearXNG Configuration
 
@@ -263,6 +326,7 @@ MetaCrawler/
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── ai_service.py          # Service tích hợp Gemini AI
+│   │   ├── crawl_service.py       # Service crawl & extract content (Hybrid)
 │   │   └── searxng_service.py     # Service tích hợp SearXNG
 │   ├── searxng/
 │   │   └── settings.yml           # Cấu hình SearXNG
