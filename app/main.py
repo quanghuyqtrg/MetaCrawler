@@ -2,14 +2,13 @@ import logging
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
-from schemas import ResearchRequest, ResearchResponse
+from schemas import ResearchRequest, ResearchResponse, CrawlRequest, CrawlResponse
 from services.ai_service import (
     generate_topic_summary,
-    rerank_search_results_with_llm,   # NEW
+    rerank_search_results_with_llm,  # NEW
 )
 from services.searxng_service import search_web_with_searxng
-
+from services.crawl_service import crawl_urls
 
 # Cấu hình log chung
 logging.basicConfig(
@@ -31,6 +30,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.get("/health")
 def health_check():
@@ -126,3 +126,24 @@ def run_research(payload: ResearchRequest):
         search_results=results,
         crawler_payload=results,
     )
+
+
+@app.post("/api/crawl", response_model=CrawlResponse)
+async def run_crawl(payload: CrawlRequest):
+    """
+    Crawl danh sách URL, trích xuất nội dung chính.
+    """
+    log.info("[api] /api/crawl urls=%d workers=%d", len(payload.urls), payload.max_workers)
+    
+    results = await crawl_urls(
+        urls=[str(u) for u in payload.urls],
+        max_workers=payload.max_workers
+    )
+    
+    # Log sơ bộ
+    ok_count = sum(1 for r in results if r.status == "ok")
+    log.info("[api] crawl finished: ok=%d/%d", ok_count, len(results))
+    
+    return CrawlResponse(results=results)
+
+

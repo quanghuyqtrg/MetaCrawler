@@ -40,3 +40,24 @@ class ResearchResponse(BaseModel):
     key_points: List[str]                  # 3–5 bullet
     search_query: str                      # query ngắn cho SearXNG
     search_results: List[SearchResult]
+    crawler_payload: Optional[List[SearchResult]] = None
+
+
+class CrawlRequest(BaseModel):
+    urls: List[HttpUrl] = Field(..., description="Danh sách URL cần crawl", min_length=1, max_length=50)
+    max_workers: int = Field(10, ge=1, le=10, description="Số lượng worker tải song song")
+
+
+class CrawlResult(BaseModel):
+    url: str
+    status: Literal["ok", "skipped", "error"]
+    title: Optional[str] = None
+    description: Optional[str] = None
+    content: Optional[str] = None
+    # content_markdown: Optional[str] = None
+    error_message: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+class CrawlResponse(BaseModel):
+    results: List[CrawlResult]
